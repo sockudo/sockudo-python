@@ -14,4 +14,7 @@ def test_validates_nested_filters() -> None:
 
 
 def test_rejects_invalid_not_node() -> None:
-    assert validate_filter(FilterNode(op="not", nodes=[])) == "NOT operation requires exactly one child node, got 0"
+    assert (
+        validate_filter(FilterNode(op="not", nodes=[]))
+        == "NOT operation requires exactly one child node, got 0"
+    )
