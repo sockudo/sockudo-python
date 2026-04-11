@@ -36,6 +36,8 @@ def test_round_trips_messagepack() -> None:
             "event": "sockudo:test",
             "channel": "chat:room-1",
             "data": {"hello": "world", "count": 3},
+            "stream_id": "stream-1",
+            "serial": 7,
             "__delta_seq": 7,
             "__conflation_key": "room",
         },
@@ -47,6 +49,8 @@ def test_round_trips_messagepack() -> None:
     assert decoded.event == "sockudo:test"
     assert decoded.channel == "chat:room-1"
     assert decoded.data == {"hello": "world", "count": 3}
+    assert decoded.stream_id == "stream-1"
+    assert decoded.serial == 7
     assert decoded.sequence == 7
     assert decoded.conflation_key == "room"
 
@@ -57,6 +61,8 @@ def test_round_trips_protobuf() -> None:
             "event": "sockudo:test",
             "channel": "chat:room-1",
             "data": {"hello": "world"},
+            "stream_id": "stream-2",
+            "serial": 9,
             "__delta_seq": 11,
             "__conflation_key": "btc",
             "extras": {
@@ -72,6 +78,8 @@ def test_round_trips_protobuf() -> None:
     assert decoded.event == "sockudo:test"
     assert decoded.channel == "chat:room-1"
     assert decoded.data == {"hello": "world"}
+    assert decoded.stream_id == "stream-2"
+    assert decoded.serial == 9
     assert decoded.sequence == 11
     assert decoded.conflation_key == "btc"
     assert decoded.extras is not None

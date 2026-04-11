@@ -258,6 +258,28 @@ class SubscriptionOptions:
     filter: Optional[FilterNode] = None
     delta: Optional[ChannelDeltaSettings] = None
     events: Optional[List[str]] = None
+    rewind: Optional["SubscriptionRewind"] = None
+
+
+@dataclass
+class SubscriptionRewind:
+    count: Optional[int] = None
+    seconds: Optional[int] = None
+
+    @classmethod
+    def count_messages(cls, count: int) -> "SubscriptionRewind":
+        return cls(count=count)
+
+    @classmethod
+    def seconds_back(cls, seconds: int) -> "SubscriptionRewind":
+        return cls(seconds=seconds)
+
+    def subscription_value(self) -> Any:
+        if self.count is not None:
+            return self.count
+        if self.seconds is not None:
+            return {"seconds": self.seconds}
+        raise SockudoException("SubscriptionRewind requires count or seconds")
 
 
 @dataclass
@@ -306,6 +328,7 @@ ChannelAuthHandler = Callable[
 UserAuthHandler = Callable[
     ["UserAuthenticationRequest"], Awaitable["UserAuthenticationData"]
 ]
+PresenceHistoryHeadersProvider = Callable[[], Dict[str, str]]
 
 
 @dataclass
@@ -353,6 +376,13 @@ class UserAuthenticationOptions:
 
 
 @dataclass
+class PresenceHistoryOptions:
+    endpoint: str
+    headers: Dict[str, str] = field(default_factory=dict)
+    headers_provider: Optional[PresenceHistoryHeadersProvider] = None
+
+
+@dataclass
 class SockudoOptions:
     cluster: str
     protocol_version: int = 2
@@ -379,6 +409,7 @@ class SockudoOptions:
     user_authentication: UserAuthenticationOptions = field(
         default_factory=UserAuthenticationOptions
     )
+    presence_history: Optional[PresenceHistoryOptions] = None
     delta_compression: Optional[DeltaOptions] = None
     message_deduplication: bool = True
     message_deduplication_capacity: int = 1000
@@ -393,17 +424,152 @@ class EventMetadata:
 
 
 @dataclass
+class PresenceHistoryParams:
+    direction: Optional[str] = None
+    limit: Optional[int] = None
+    cursor: Optional[str] = None
+    start_serial: Optional[int] = None
+    end_serial: Optional[int] = None
+    start_time_ms: Optional[int] = None
+    end_time_ms: Optional[int] = None
+    start: Optional[int] = None
+    end: Optional[int] = None
+
+    def to_payload(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if self.direction is not None:
+            payload["direction"] = self.direction
+        if self.limit is not None:
+            payload["limit"] = self.limit
+        if self.cursor is not None:
+            payload["cursor"] = self.cursor
+        if self.start_serial is not None:
+            payload["start_serial"] = self.start_serial
+        if self.end_serial is not None:
+            payload["end_serial"] = self.end_serial
+        if self.start_time_ms is not None:
+            payload["start_time_ms"] = self.start_time_ms
+        elif self.start is not None:
+            payload["start_time_ms"] = self.start
+        if self.end_time_ms is not None:
+            payload["end_time_ms"] = self.end_time_ms
+        elif self.end is not None:
+            payload["end_time_ms"] = self.end
+        return payload
+
+
+@dataclass
+class PresenceHistoryBounds:
+    start_serial: Optional[int]
+    end_serial: Optional[int]
+    start_time_ms: Optional[int]
+    end_time_ms: Optional[int]
+
+
+@dataclass
+class PresenceHistoryContinuity:
+    stream_id: Optional[str]
+    oldest_available_serial: Optional[int]
+    newest_available_serial: Optional[int]
+    oldest_available_published_at_ms: Optional[int]
+    newest_available_published_at_ms: Optional[int]
+    retained_events: int
+    retained_bytes: int
+    degraded: bool
+    complete: bool
+    truncated_by_retention: bool
+
+
+@dataclass
+class PresenceHistoryItem:
+    stream_id: str
+    serial: int
+    published_at_ms: int
+    event: str
+    cause: str
+    user_id: str
+    connection_id: Optional[str]
+    dead_node_id: Optional[str]
+    payload_size_bytes: int
+    presence_event: Dict[str, Any]
+
+
+@dataclass
+class PresenceSnapshotParams:
+    at_time_ms: Optional[int] = None
+    at: Optional[int] = None
+    at_serial: Optional[int] = None
+
+    def to_payload(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if self.at_time_ms is not None:
+            payload["at_time_ms"] = self.at_time_ms
+        elif self.at is not None:
+            payload["at_time_ms"] = self.at
+        if self.at_serial is not None:
+            payload["at_serial"] = self.at_serial
+        return payload
+
+
+@dataclass
+class PresenceSnapshotMember:
+    user_id: str
+    last_event: str
+    last_event_serial: int
+    last_event_at_ms: int
+
+
+@dataclass
+class PresenceSnapshot:
+    channel: str
+    members: List[PresenceSnapshotMember]
+    member_count: int
+    events_replayed: int
+    snapshot_serial: Optional[int]
+    snapshot_time_ms: Optional[int]
+    continuity: PresenceHistoryContinuity
+
+
+@dataclass
+class PresenceHistoryPage:
+    items: List[PresenceHistoryItem]
+    direction: str
+    limit: int
+    has_more: bool
+    next_cursor: Optional[str]
+    bounds: PresenceHistoryBounds
+    continuity: PresenceHistoryContinuity
+    _fetch_next: Optional[Callable[[str], Awaitable["PresenceHistoryPage"]]] = None
+
+    def has_next(self) -> bool:
+        return self.has_more and self.next_cursor is not None
+
+    async def next(self) -> "PresenceHistoryPage":
+        if not self.has_next() or self._fetch_next is None:
+            raise SockudoException("No more pages available")
+        return await self._fetch_next(self.next_cursor)
+
+
+@dataclass
 class SockudoEvent:
     event: str
     channel: Optional[str]
     data: Any
     user_id: Optional[str]
     message_id: Optional[str]
+    stream_id: Optional[str]
     raw_message: str
     sequence: Optional[int] = None
     conflation_key: Optional[str] = None
     serial: Optional[int] = None
     extras: Optional[MessageExtras] = None
+
+
+@dataclass
+class RecoveryPosition:
+    serial: int
+    stream_id: Optional[str] = None
+    last_message_id: Optional[str] = None
 
 
 class ProtocolPrefix:
@@ -643,6 +809,7 @@ class ProtocolCodec:
         "extras",
         "__delta_seq",
         "__conflation_key",
+        "stream_id",
     ]
 
     @staticmethod
@@ -667,6 +834,7 @@ class ProtocolCodec:
                 ProtocolCodec._encode_messagepack_extras(envelope.get("extras")),
                 envelope.get("__delta_seq"),
                 envelope.get("__conflation_key"),
+                envelope.get("stream_id"),
             ]
             return msgpack.packb(payload, use_bin_type=True)
         return ProtocolCodec._encode_protobuf(envelope)
@@ -689,6 +857,7 @@ class ProtocolCodec:
             data=data,
             user_id=envelope.get("user_id"),
             message_id=envelope.get("message_id"),
+            stream_id=envelope.get("stream_id"),
             raw_message=raw_text,
             sequence=_coerce_int(envelope.get("__delta_seq", envelope.get("sequence"))),
             conflation_key=envelope.get(
@@ -835,6 +1004,7 @@ class ProtocolCodec:
             _write_bytes_field(output, 12, extras)
         _write_uint_field(output, 13, envelope.get("__delta_seq"))
         _write_string_field(output, 14, envelope.get("__conflation_key"))
+        _write_string_field(output, 15, envelope.get("stream_id"))
         return bytes(output)
 
     @staticmethod
@@ -869,7 +1039,7 @@ class ProtocolCodec:
             tag, index = _read_varint(payload, index)
             field = tag >> 3
             wire = tag & 0x7
-            if field in {1, 2, 5, 8, 9, 14}:
+            if field in {1, 2, 5, 8, 9, 14, 15}:
                 value, index = _read_length_delimited(payload, index)
                 envelope[
                     {
@@ -879,6 +1049,7 @@ class ProtocolCodec:
                         8: "conflation_key",
                         9: "message_id",
                         14: "__conflation_key",
+                        15: "stream_id",
                     }[field]
                 ] = value.decode("utf-8")
             elif field in {7, 10, 13}:
@@ -1168,6 +1339,7 @@ class SockudoChannel:
         self.filter: Optional[FilterNode] = None
         self.delta_settings: Optional[ChannelDeltaSettings] = None
         self.events_filter: Optional[List[str]] = None
+        self.rewind: Optional[SubscriptionRewind] = None
 
     def bind(
         self, event_name: str, callback: Callable[[Any, Optional[EventMetadata]], None]
@@ -1215,6 +1387,8 @@ class SockudoChannel:
                 payload["delta"] = self.delta_settings.subscription_value()
             if self.events_filter is not None:
                 payload["events"] = self.events_filter
+            if self.rewind is not None:
+                payload["rewind"] = self.rewind.subscription_value()
             await self.client.send_event(
                 self.client.prefix.event("subscribe"), payload, None
             )
@@ -1307,6 +1481,20 @@ class PresenceChannel(PrivateChannel):
         self.members.reset()
         super().disconnect()
 
+    async def history(
+        self, params: Optional[PresenceHistoryParams] = None
+    ) -> PresenceHistoryPage:
+        return await self.client.config.fetch_presence_history(
+            self.name, params or PresenceHistoryParams()
+        )
+
+    async def snapshot(
+        self, params: Optional[PresenceSnapshotParams] = None
+    ) -> PresenceSnapshot:
+        return await self.client.config.fetch_presence_snapshot(
+            self.name, params or PresenceSnapshotParams()
+        )
+
 
 class EncryptedChannel(PrivateChannel):
     def __init__(self, name: str, client: "SockudoClient") -> None:
@@ -1369,6 +1557,7 @@ class _ResolvedConfiguration:
         self.disabled_transports = options.disabled_transports
         self.channel_options = options.channel_authorization
         self.user_options = options.user_authentication
+        self.presence_history = options.presence_history
         self._http_client = httpx.AsyncClient()
 
     async def authorize_channel(
@@ -1420,6 +1609,62 @@ class _ResolvedConfiguration:
     async def close(self) -> None:
         await self._http_client.aclose()
 
+    async def fetch_presence_history(
+        self, channel_name: str, params: PresenceHistoryParams
+    ) -> PresenceHistoryPage:
+        config = self.presence_history
+        if config is None:
+            raise UnsupportedFeature(
+                "presence_history.endpoint must be configured to use presence.history(). "
+                "This endpoint should proxy requests to the Sockudo server REST API."
+            )
+
+        payload = await self._perform_presence_history_request(
+            config.endpoint,
+            config.headers,
+            config.headers_provider,
+            channel_name,
+            params.to_payload(),
+            "history",
+        )
+        return self._decode_presence_history_page(
+            payload,
+            lambda cursor: self.fetch_presence_history(
+                channel_name,
+                PresenceHistoryParams(
+                    direction=params.direction,
+                    limit=params.limit,
+                    cursor=cursor,
+                    start_serial=params.start_serial,
+                    end_serial=params.end_serial,
+                    start_time_ms=params.start_time_ms,
+                    end_time_ms=params.end_time_ms,
+                    start=params.start,
+                    end=params.end,
+                ),
+            ),
+        )
+
+    async def fetch_presence_snapshot(
+        self, channel_name: str, params: PresenceSnapshotParams
+    ) -> PresenceSnapshot:
+        config = self.presence_history
+        if config is None:
+            raise UnsupportedFeature(
+                "presence_history.endpoint must be configured to use presence.snapshot(). "
+                "This endpoint should proxy requests to the Sockudo server REST API."
+            )
+
+        payload = await self._perform_presence_history_request(
+            config.endpoint,
+            config.headers,
+            config.headers_provider,
+            channel_name,
+            params.to_payload(),
+            "snapshot",
+        )
+        return self._decode_presence_snapshot(payload)
+
     async def _perform_auth_request(
         self, endpoint: str, headers: Dict[str, str], params: Dict[str, AuthValue]
     ) -> Dict[str, Any]:
@@ -1444,6 +1689,184 @@ class _ResolvedConfiguration:
                 response.status_code, "JSON returned from auth endpoint was invalid"
             )
         return payload
+
+    async def _perform_presence_history_request(
+        self,
+        endpoint: str,
+        headers: Dict[str, str],
+        headers_provider: Optional[PresenceHistoryHeadersProvider],
+        channel_name: str,
+        params: Dict[str, Any],
+        action: str,
+    ) -> Dict[str, Any]:
+        merged_headers = {"Content-Type": "application/json", **headers}
+        if headers_provider:
+            merged_headers.update(headers_provider())
+        response = await self._http_client.post(
+            endpoint,
+            headers=merged_headers,
+            content=json.dumps(
+                {
+                    "channel": channel_name,
+                    "params": params,
+                    "action": action,
+                }
+            ),
+        )
+        if response.status_code >= 400:
+            raise SockudoException(
+                f"Presence {action} request failed ({response.status_code}): "
+                f"{response.text}"
+            )
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise SockudoException(
+                f"Presence {action} endpoint returned invalid JSON"
+            )
+        return payload
+
+    def _decode_presence_history_page(
+        self,
+        payload: Dict[str, Any],
+        fetch_next: Callable[[str], Awaitable[PresenceHistoryPage]],
+    ) -> PresenceHistoryPage:
+        return PresenceHistoryPage(
+            items=[
+                PresenceHistoryItem(
+                    stream_id=str(item["stream_id"]),
+                    serial=int(item["serial"]),
+                    published_at_ms=int(item["published_at_ms"]),
+                    event=str(item["event"]),
+                    cause=str(item["cause"]),
+                    user_id=str(item["user_id"]),
+                    connection_id=(
+                        str(item["connection_id"])
+                        if item.get("connection_id") is not None
+                        else None
+                    ),
+                    dead_node_id=(
+                        str(item["dead_node_id"])
+                        if item.get("dead_node_id") is not None
+                        else None
+                    ),
+                    payload_size_bytes=int(item["payload_size_bytes"]),
+                    presence_event=dict(item.get("presence_event") or {}),
+                )
+                for item in payload.get("items", [])
+                if isinstance(item, dict)
+            ],
+            direction=str(payload.get("direction", "oldest_first")),
+            limit=int(payload.get("limit", 0)),
+            has_more=bool(payload.get("has_more", False)),
+            next_cursor=(
+                str(payload["next_cursor"])
+                if payload.get("next_cursor") is not None
+                else None
+            ),
+            bounds=self._decode_presence_history_bounds(payload.get("bounds")),
+            continuity=self._decode_presence_history_continuity(
+                payload.get("continuity")
+            ),
+            _fetch_next=fetch_next,
+        )
+
+    def _decode_presence_snapshot(self, payload: Dict[str, Any]) -> PresenceSnapshot:
+        return PresenceSnapshot(
+            channel=str(payload.get("channel", "")),
+            members=[
+                PresenceSnapshotMember(
+                    user_id=str(member["user_id"]),
+                    last_event=str(member["last_event"]),
+                    last_event_serial=int(member["last_event_serial"]),
+                    last_event_at_ms=int(member["last_event_at_ms"]),
+                )
+                for member in payload.get("members", [])
+                if isinstance(member, dict)
+            ],
+            member_count=int(payload.get("member_count", 0)),
+            events_replayed=int(payload.get("events_replayed", 0)),
+            snapshot_serial=(
+                int(payload["snapshot_serial"])
+                if payload.get("snapshot_serial") is not None
+                else None
+            ),
+            snapshot_time_ms=(
+                int(payload["snapshot_time_ms"])
+                if payload.get("snapshot_time_ms") is not None
+                else None
+            ),
+            continuity=self._decode_presence_history_continuity(
+                payload.get("continuity")
+            ),
+        )
+
+    def _decode_presence_history_bounds(
+        self, payload: Any
+    ) -> PresenceHistoryBounds:
+        if not isinstance(payload, dict):
+            payload = {}
+        return PresenceHistoryBounds(
+            start_serial=(
+                int(payload["start_serial"])
+                if payload.get("start_serial") is not None
+                else None
+            ),
+            end_serial=(
+                int(payload["end_serial"])
+                if payload.get("end_serial") is not None
+                else None
+            ),
+            start_time_ms=(
+                int(payload["start_time_ms"])
+                if payload.get("start_time_ms") is not None
+                else None
+            ),
+            end_time_ms=(
+                int(payload["end_time_ms"])
+                if payload.get("end_time_ms") is not None
+                else None
+            ),
+        )
+
+    def _decode_presence_history_continuity(
+        self, payload: Any
+    ) -> PresenceHistoryContinuity:
+        if not isinstance(payload, dict):
+            payload = {}
+        return PresenceHistoryContinuity(
+            stream_id=(
+                str(payload["stream_id"])
+                if payload.get("stream_id") is not None
+                else None
+            ),
+            oldest_available_serial=(
+                int(payload["oldest_available_serial"])
+                if payload.get("oldest_available_serial") is not None
+                else None
+            ),
+            newest_available_serial=(
+                int(payload["newest_available_serial"])
+                if payload.get("newest_available_serial") is not None
+                else None
+            ),
+            oldest_available_published_at_ms=(
+                int(payload["oldest_available_published_at_ms"])
+                if payload.get("oldest_available_published_at_ms") is not None
+                else None
+            ),
+            newest_available_published_at_ms=(
+                int(payload["newest_available_published_at_ms"])
+                if payload.get("newest_available_published_at_ms") is not None
+                else None
+            ),
+            retained_events=int(payload.get("retained_events", 0)),
+            retained_bytes=int(payload.get("retained_bytes", 0)),
+            degraded=bool(payload.get("degraded", False)),
+            complete=bool(payload.get("complete", False)),
+            truncated_by_retention=bool(
+                payload.get("truncated_by_retention", False)
+            ),
+        )
 
 
 class SockudoClient:
@@ -1470,7 +1893,7 @@ class SockudoClient:
         self._manually_disconnected = False
         self._current_transport: Optional[SockudoTransport] = None
         self._attempted_fallback = False
-        self._channel_serials: Dict[str, int] = {}
+        self._channel_positions: Dict[str, RecoveryPosition] = {}
         self._deduplicator = (
             MessageDeduplicator(options.message_deduplication_capacity)
             if options.message_deduplication
@@ -1508,6 +1931,7 @@ class SockudoClient:
             channel.filter = options.filter
             channel.delta_settings = options.delta
             channel.events_filter = options.events
+            channel.rewind = options.rewind
         channel.subscribe_if_possible()
         return channel
 
@@ -1522,7 +1946,7 @@ class SockudoClient:
             await channel.unsubscribe()
         else:
             self.channels.pop(channel_name, None)
-        self._channel_serials.pop(channel_name, None)
+        self._channel_positions.pop(channel_name, None)
         if self._delta_manager is not None:
             self._delta_manager.clear_channel_state(channel_name)
 
@@ -1595,7 +2019,11 @@ class SockudoClient:
                 and event.channel
                 and event.serial is not None
             ):
-                self._channel_serials[event.channel] = event.serial
+                self._channel_positions[event.channel] = RecoveryPosition(
+                    serial=event.serial,
+                    stream_id=event.stream_id,
+                    last_message_id=event.message_id,
+                )
             event_name = event.event
             if event_name == self.prefix.event("connection_established"):
                 payload = event.data if isinstance(event.data, dict) else {}
@@ -1607,10 +2035,23 @@ class SockudoClient:
                 )
                 for channel in self.channels.values():
                     channel.subscribe_if_possible()
-                if self.options.connection_recovery and self._channel_serials:
+                if self.options.connection_recovery and self._channel_positions:
                     await self.send_event(
                         self.prefix.event("resume"),
-                        {"channel_serials": self._channel_serials},
+                        {
+                            "channel_positions": {
+                                channel_name: {
+                                    key: value
+                                    for key, value in {
+                                        "serial": position.serial,
+                                        "stream_id": position.stream_id,
+                                        "last_message_id": position.last_message_id,
+                                    }.items()
+                                    if value is not None
+                                }
+                                for channel_name, position in self._channel_positions.items()
+                            }
+                        },
                         None,
                     )
                 if (
@@ -1630,7 +2071,7 @@ class SockudoClient:
                 payload = event.data if isinstance(event.data, dict) else {}
                 failed_channel_name = payload.get("channel")
                 if isinstance(failed_channel_name, str):
-                    self._channel_serials.pop(failed_channel_name, None)
+                    self._channel_positions.pop(failed_channel_name, None)
                     if self._delta_manager is not None:
                         self._delta_manager.clear_channel_state(failed_channel_name)
                     failed_channel = self.channels.get(failed_channel_name)

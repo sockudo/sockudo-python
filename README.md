@@ -8,8 +8,9 @@ Async Sockudo client SDK for Python.
 
 - Protocol V2 by default, with V1 compatibility
 - Public, private, presence, and encrypted channels
+- Proxy-backed presence history and presence snapshot helpers
 - Tag filter and per-subscription event filter helpers
-- Connection recovery serial tracking
+- Continuity-aware connection recovery (`stream_id` + `serial`)
 - Message deduplication
 - JSON, MessagePack, and Protobuf wire formats
 - Fossil and Xdelta3/VCDIFF delta compression support
@@ -137,6 +138,36 @@ channel.bind(
 await client.connect()
 ```
 
+### Presence History
+
+Client-side presence history is proxy-backed. The Python client does not sign the server REST API directly; configure a backend endpoint that accepts `{channel, params, action}` and proxies the request with server credentials.
+
+```python
+from sockudo_python import PresenceHistoryOptions, PresenceHistoryParams, PresenceSnapshotParams
+
+client = SockudoClient(
+    "app-key",
+    SockudoOptions(
+        cluster="local",
+        ws_host="127.0.0.1",
+        ws_port=6001,
+        presence_history=PresenceHistoryOptions(
+            endpoint="https://api.example.com/sockudo/presence-history",
+        ),
+    ),
+)
+
+channel = client.subscribe("presence-lobby")
+
+page = await channel.history(
+    PresenceHistoryParams(limit=50, direction="newest_first")
+)
+if page.has_next():
+    next_page = await page.next()
+
+snapshot = await channel.snapshot(PresenceSnapshotParams(at_serial=4))
+```
+
 ### Filter-Aware Subscriptions
 
 Server-side tag filtering is a V2 feature. Only messages whose tags match the filter expression are delivered to this subscription.
@@ -163,7 +194,7 @@ channel = client.subscribe(
 )
 ```
 
-### Delta Compression
+### Delta Compression And Rewind
 
 Request delta-compressed delivery to reduce bandwidth for channels that carry frequently-updated payloads:
 
@@ -180,6 +211,16 @@ channel = client.subscribe(
     ),
 )
 channel.bind("snapshot", lambda data, meta: print(data))
+
+channel = client.subscribe(
+    "market:btc",
+    options=SubscriptionOptions(
+        rewind=SubscriptionRewind.seconds_back(30),
+    ),
+)
+
+client.bind("sockudo:resume_success", lambda data, _: print(data))
+channel.bind("sockudo:rewind_complete", lambda data, _: print(data))
 ```
 
 ### Encrypted Channels
@@ -244,7 +285,7 @@ await client.connect()
 V2 is the default. To explicitly request it or to downgrade to V1 for strict Pusher SDK compatibility:
 
 ```python
-# V2 (default) — enables serial tracking, message_id, recovery, filters, delta
+# V2 (default) — enables continuity tokens, message_id, recovery, filters, delta
 client = SockudoClient("app-key", SockudoOptions(cluster="local", protocol_version=2))
 
 # V1 — plain Pusher protocol, compatible with official Pusher SDKs
